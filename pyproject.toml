@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prompt-injection-lora-tune"
+version = "0.1.0"
+description = "LoRA fine-tune of a small open model for prompt-injection classification, with honest synthetic-data evals"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Anusha Mukka" }]
+keywords = ["llm-security", "prompt-injection", "lora", "fine-tuning", "qwen"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+gpu = [
+    "torch>=2.4",
+    "transformers>=4.44",
+    "peft>=0.12",
+    "trl>=0.9.0",
+    "datasets>=2.20",
+    "accelerate>=0.33",
+]
+test = ["pytest>=8"]
+
+[project.scripts]
+pilora-build-data = "pilora.dataset:main"
+pilora-train = "pilora.train:main"
+pilora-eval = "pilora.evaluate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
