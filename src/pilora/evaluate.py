@@ -22,6 +22,7 @@ import json
 import time
 from pathlib import Path
 
+from .config import load_config
 from .dataset import SYSTEM_PROMPT, load_jsonl
 from .metrics import (
     classification_report,
@@ -31,6 +32,8 @@ from .metrics import (
 )
 
 MAX_NEW_TOKENS = 8
+DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_DATA = "data/prompt_injection_sft.jsonl"
 
 
 def build_prompt(tokenizer, text: str) -> str:
@@ -41,12 +44,19 @@ def build_prompt(tokenizer, text: str) -> str:
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def run_eval(model_name: str, data_path: str, adapter_path: str | None = None,
-             max_new_tokens: int = MAX_NEW_TOKENS) -> dict:
+def run_eval(
+    model_name: str,
+    data_path: str,
+    adapter_path: str | None = None,
+    max_new_tokens: int = MAX_NEW_TOKENS,
+    split: str = "test",
+) -> dict:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    records = [r for r in load_jsonl(Path(data_path)) if r["split"] == "test"]
+    records = [r for r in load_jsonl(Path(data_path)) if r["split"] == split]
+    if not records:
+        raise ValueError(f"no records with split={split!r} in {data_path}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -55,6 +65,7 @@ def run_eval(model_name: str, data_path: str, adapter_path: str | None = None,
     )
     if adapter_path:
         from peft import PeftModel
+
         model = PeftModel.from_pretrained(model, adapter_path)
         model = model.merge_and_unload()
     model.eval()
@@ -69,12 +80,13 @@ def run_eval(model_name: str, data_path: str, adapter_path: str | None = None,
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
             start = time.perf_counter()
             out = model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
             )
             elapsed_ms = (time.perf_counter() - start) * 1000.0
-            gen = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:],
-                                   skip_special_tokens=True)
+            gen = tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
             preds.append(parse_label(gen))
             labels.append(rec["label"])
             latencies_ms.append(elapsed_ms)
@@ -86,9 +98,9 @@ def run_eval(model_name: str, data_path: str, adapter_path: str | None = None,
     report["latency"] = summarize_latency(latencies_ms)
     report["model"] = model_name
     report["adapter"] = adapter_path
+    report["split"] = split
     report["by_category"] = {
-        cat: classification_report(b["preds"], b["labels"])
-        for cat, b in per_category.items()
+        cat: classification_report(b["preds"], b["labels"]) for cat, b in per_category.items()
     }
     return report
 
@@ -166,14 +178,52 @@ def render_comparison(a: dict, b: dict, name_a: str, name_b: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Evaluate prompt-injection classifier")
-    p.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    p.add_argument(
+        "--config",
+        default=None,
+        help="YAML config file (see configs/eval.yaml); CLI flags override it",
+    )
+    p.add_argument("--model", default=None)
     p.add_argument("--adapter", default=None, help="path to LoRA adapter (optional)")
-    p.add_argument("--data", default="data/prompt_injection_sft.jsonl")
+    p.add_argument("--data", default=None)
+    p.add_argument("--max-new-tokens", type=int, default=None)
     p.add_argument("--out", default="reports/eval")
-    p.add_argument("--compare", nargs=2, metavar=("A_JSON", "B_JSON"),
-                   help="render comparison markdown from two report.json files")
+    p.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("A_JSON", "B_JSON"),
+        help="render comparison markdown from two report.json files",
+    )
+    return p
+
+
+def resolve_eval_settings(args: argparse.Namespace) -> dict:
+    """Merge --config file (if given) with explicit CLI flags. No heavy imports."""
+    model, data, max_new_tokens, split = DEFAULT_MODEL, DEFAULT_DATA, MAX_NEW_TOKENS, "test"
+    if args.config:
+        raw = load_config(args.config)
+        model = raw.get("model") or model
+        data = raw.get("data") or data
+        ev = raw.get("eval") or {}
+        max_new_tokens = ev.get("max_new_tokens", max_new_tokens)
+        split = ev.get("split", split)
+    if args.model:
+        model = args.model
+    if args.data:
+        data = args.data
+    if args.max_new_tokens is not None:
+        max_new_tokens = args.max_new_tokens
+    if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
+        raise SystemExit(f"invalid max_new_tokens: {max_new_tokens!r}")
+    if split not in ("train", "val", "test"):
+        raise SystemExit(f"invalid eval split: {split!r}")
+    return {"model": model, "data": data, "max_new_tokens": max_new_tokens, "split": split}
+
+
+def main() -> None:
+    p = build_arg_parser()
     args = p.parse_args()
 
     if args.compare:
@@ -186,7 +236,14 @@ def main() -> None:
         print(f"wrote {out_path}")
         return
 
-    report = run_eval(args.model, args.data, args.adapter)
+    settings = resolve_eval_settings(args)
+    report = run_eval(
+        settings["model"],
+        settings["data"],
+        args.adapter,
+        max_new_tokens=settings["max_new_tokens"],
+        split=settings["split"],
+    )
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(json.dumps(report, indent=2))
