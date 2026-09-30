@@ -16,7 +16,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+dependencies = ["pyyaml>=6.0"]
 
 [project.optional-dependencies]
 gpu = [
@@ -33,6 +33,7 @@ test = ["pytest>=8"]
 pilora-build-data = "pilora.dataset:main"
 pilora-train = "pilora.train:main"
 pilora-eval = "pilora.evaluate:main"
+pilora-infer = "pilora.infer:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
