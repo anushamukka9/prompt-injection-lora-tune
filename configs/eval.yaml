@@ -1,0 +1,10 @@
+# Eval defaults for pilora-eval. CLI flags (--model, --data, --adapter,
+# --max-new-tokens, --out) override these. See src/pilora/config.py for
+# validation rules. Note: only the "eval" section plus "model" are used by
+# pilora-eval; the rest is ignored so this file can share structure with
+# configs/base.yaml.
+model: Qwen/Qwen2.5-0.5B-Instruct
+data: data/prompt_injection_sft.jsonl
+eval:
+  max_new_tokens: 8
+  split: test
