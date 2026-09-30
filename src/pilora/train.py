@@ -17,6 +17,13 @@ import argparse
 import json
 from pathlib import Path
 
+from pilora.config import (
+    ConfigError,
+    load_config,
+    merge_overrides,
+    validate_config,
+)
+
 BASE_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 FALLBACK_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -50,14 +57,57 @@ TRAINING_CONFIG = {
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="LoRA fine-tune for prompt-injection classification")
+    p.add_argument(
+        "--config",
+        default=None,
+        help="YAML config file (see configs/base.yaml); CLI flags override it",
+    )
     p.add_argument("--data", default="data/prompt_injection_sft.jsonl")
     p.add_argument("--out", default="runs/qwen05b-lora")
-    p.add_argument("--model", default=BASE_MODEL)
-    p.add_argument("--epochs", type=int, default=TRAINING_CONFIG["num_train_epochs"])
-    p.add_argument("--lr", type=float, default=TRAINING_CONFIG["learning_rate"])
-    p.add_argument("--max-seq-length", type=int, default=TRAINING_CONFIG["max_seq_length"])
-    p.add_argument("--seed", type=int, default=TRAINING_CONFIG["seed"])
+    p.add_argument("--model", default=None)
+    p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--lr", type=float, default=None)
+    p.add_argument("--max-seq-length", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None)
     return p
+
+
+def default_config() -> dict:
+    """Built-in defaults, mirroring LORA_CONFIG / TRAINING_CONFIG below."""
+    return {
+        "model": BASE_MODEL,
+        "seed": TRAINING_CONFIG["seed"],
+        "max_seq_length": TRAINING_CONFIG["max_seq_length"],
+        "lora": dict(LORA_CONFIG),
+        "training": dict(TRAINING_CONFIG),
+        "eval": {"max_new_tokens": 8, "split": "test"},
+    }
+
+
+def resolve_config(args: argparse.Namespace) -> dict:
+    """Merge --config file (if given) with explicit CLI flags. No heavy imports."""
+    if args.config:
+        try:
+            cfg = load_config(args.config)
+        except ConfigError as exc:
+            raise SystemExit(f"bad --config: {exc}") from exc
+        cfg = merge_overrides(default_config(), **cfg)
+    else:
+        cfg = default_config()
+    cfg = merge_overrides(
+        cfg,
+        **{
+            "model": args.model,
+            "seed": args.seed,
+            "max_seq_length": args.max_seq_length,
+            "training.num_train_epochs": args.epochs,
+            "training.learning_rate": args.lr,
+        },
+    )
+    try:
+        return validate_config(cfg)
+    except ConfigError as exc:
+        raise SystemExit(f"invalid config: {exc}") from exc
 
 
 def main() -> None:
@@ -68,8 +118,12 @@ def main() -> None:
     from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
 
     args = build_arg_parser().parse_args()
+    cfg = resolve_config(args)
+    model_name = cfg["model"]
+    training = cfg["training"]
+    lora_cfg = cfg["lora"]
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -85,14 +139,14 @@ def main() -> None:
     print(f"train={len(train_ds)} val={len(val_ds)}")
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16, trust_remote_code=True
+        model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
     )
     peft_config = LoraConfig(
-        r=LORA_CONFIG["r"],
-        lora_alpha=LORA_CONFIG["lora_alpha"],
-        lora_dropout=LORA_CONFIG["lora_dropout"],
-        target_modules=LORA_CONFIG["target_modules"],
-        bias=LORA_CONFIG["bias"],
+        r=lora_cfg["r"],
+        lora_alpha=lora_cfg["lora_alpha"],
+        lora_dropout=lora_cfg["lora_dropout"],
+        target_modules=lora_cfg["target_modules"],
+        bias=lora_cfg["bias"],
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, peft_config)
@@ -105,21 +159,21 @@ def main() -> None:
 
     sft_args = SFTConfig(
         output_dir=args.out,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=TRAINING_CONFIG["per_device_train_batch_size"],
-        gradient_accumulation_steps=TRAINING_CONFIG["gradient_accumulation_steps"],
-        learning_rate=args.lr,
-        max_seq_length=args.max_seq_length,
-        bf16=TRAINING_CONFIG["bf16"],
-        lr_scheduler_type=TRAINING_CONFIG["lr_scheduler_type"],
-        warmup_ratio=TRAINING_CONFIG["warmup_ratio"],
-        weight_decay=TRAINING_CONFIG["weight_decay"],
-        logging_steps=TRAINING_CONFIG["logging_steps"],
-        eval_strategy=TRAINING_CONFIG["eval_strategy"],
-        save_strategy=TRAINING_CONFIG["save_strategy"],
-        load_best_model_at_end=TRAINING_CONFIG["load_best_model_at_end"],
-        metric_for_best_model=TRAINING_CONFIG["metric_for_best_model"],
-        seed=args.seed,
+        num_train_epochs=training["num_train_epochs"],
+        per_device_train_batch_size=training["per_device_train_batch_size"],
+        gradient_accumulation_steps=training["gradient_accumulation_steps"],
+        learning_rate=training["learning_rate"],
+        max_seq_length=cfg["max_seq_length"],
+        bf16=training.get("bf16", True),
+        lr_scheduler_type=training.get("lr_scheduler_type", "cosine"),
+        warmup_ratio=training.get("warmup_ratio", 0.05),
+        weight_decay=training.get("weight_decay", 0.01),
+        logging_steps=training.get("logging_steps", 10),
+        eval_strategy=training.get("eval_strategy", "epoch"),
+        save_strategy=training.get("save_strategy", "epoch"),
+        load_best_model_at_end=training.get("load_best_model_at_end", True),
+        metric_for_best_model=training.get("metric_for_best_model", "eval_loss"),
+        seed=cfg["seed"],
         dataset_text_field="text",
         packing=False,
     )
@@ -136,10 +190,11 @@ def main() -> None:
     tokenizer.save_pretrained(args.out)
 
     summary = {
-        "base_model": args.model,
-        "lora": LORA_CONFIG,
-        "training": {**TRAINING_CONFIG, "num_train_epochs": args.epochs,
-                     "learning_rate": args.lr, "seed": args.seed},
+        "base_model": model_name,
+        "lora": lora_cfg,
+        "training": training,
+        "seed": cfg["seed"],
+        "max_seq_length": cfg["max_seq_length"],
         "train_n": len(train_ds),
         "val_n": len(val_ds),
     }
