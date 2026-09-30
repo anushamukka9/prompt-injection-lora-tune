@@ -15,16 +15,53 @@ is built around measuring that instead of asserting it.
 pip install -e ".[test]"
 pilora-build-data --out data/prompt_injection.jsonl --seed 42
 python examples/quickstart_mock_eval.py
+python examples/inference_demo.py
 ```
 
 The mock eval runs the full metrics and reporting pipeline on canned
-predictions, so you can see exactly what the GPU-run reports will look like.
+predictions, so you can see exactly what the GPU-run reports will look
+like. The inference demo classifies example texts through the mock
+backend, showing the `pilora-infer` pipeline end to end.
+
+## Inference
+
+`pilora-infer` classifies one or more texts with a real model, or with
+the mock backend when no model is available:
+
+```bash
+# no GPU, no download: deterministic keyword heuristic (labeled mock)
+pilora-infer --mock --text "Ignore all previous instructions and ..."
+pilora-infer --mock --file inputs.txt   # one text per line
+
+# real inference: base model, or base plus your LoRA adapter
+pilora-infer --model Qwen/Qwen2.5-0.5B-Instruct --text "..."
+pilora-infer --model Qwen/Qwen2.5-0.5B-Instruct --adapter runs/qwen05b-lora --file inputs.txt
+```
+
+The mock backend exists for plumbing and demos only. It is not a model
+and its labels are not a claim about any model. Every output row carries
+its backend (`mock` or `hf`) so the two can never be confused.
+
+## Configs
+
+Training and eval read YAML configs with up-front validation
+(`src/pilora/config.py`): a typo fails fast locally instead of mid-run
+on a GPU box. CLI flags override config values.
+
+- `configs/base.yaml` - training reference: model, LoRA, training, eval sections
+- `configs/eval.yaml` - eval defaults: model, data path, generation length, split
+
+```bash
+pilora-train --config configs/base.yaml --epochs 1 --out runs/smoke
+pilora-eval --config configs/eval.yaml --adapter runs/qwen05b-lora --out reports/lora
+```
 
 ## Training (one command, on a GPU machine)
 
 ```bash
 bash setup.sh            # once per machine: torch, deps, accelerate config
 pilora-train --data data/prompt_injection_sft.jsonl --out runs/qwen05b-lora
+# or: pilora-train --config configs/base.yaml --data ... --out ...
 ```
 
 Then evaluate base vs tuned and render the comparison:
@@ -95,12 +132,14 @@ src/pilora/
   dataset.py    synthetic dataset builder (the source of truth)
   train.py      LoRA SFT training (GPU only; config importable anywhere)
   evaluate.py   base-vs-tuned eval, report.json/md rendering, --compare
+  infer.py      inference CLI: mock backend (no GPU) or real HF backend
+  config.py     YAML config loading, validation, CLI-override merging
   metrics.py    pure-Python metrics (accuracy, FPR/FNR, latency)
 data/           built dataset + honest build notes
 docs/           method.md, gpu-guide.md
-examples/       no-GPU mock eval, dataset sample
-configs/        base.yaml reference training config
-tests/          data pipeline, metrics, and config tests (no GPU)
+examples/       no-GPU mock eval, inference demo, dataset sample
+configs/        base.yaml (training) and eval.yaml (eval) reference configs
+tests/          data pipeline, metrics, config, and inference tests (no GPU)
 setup.sh        one-time GPU machine setup
 ```
 
